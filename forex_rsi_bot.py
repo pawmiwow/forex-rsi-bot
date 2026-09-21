@@ -13,8 +13,8 @@ from flask import Flask
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 CHECK_INTERVAL = 300          # 5分钟
 RSI_PERIOD = 14
-OVERBOUGHT = 72
-OVERSOLD = 28
+OVERBOUGHT = 73
+OVERSOLD = 27
 
 PAIRS = [
     "GBPUSD=X", "EURUSD=X", "AUDUSD=X", "NZDUSD=X",
@@ -92,21 +92,29 @@ def get_latest_rsi(ticker):
 
 def send_discord_alert(pair_name, rsi_value, price, signal_type, time_str):
     color = 0xFF0000 if signal_type == "超买" else 0x00FF00
+
+    # 第一行标题样式：【NZD/JPY】 RSI(14) 73
+    title_text = f"【{pair_name}】 RSI(14) {rsi_value:.2f}"
+
     embed = {
-        "title": f"🚨 RSI {signal_type} 信号",
+        "title": title_text,
+        "description": f"**{signal_type}信号**",
         "color": color,
         "fields": [
-            {"name": "货币对", "value": pair_name, "inline": True},
-            {"name": "RSI(14)", "value": f"**{rsi_value:.2f}**", "inline": True},
             {"name": "当前价格", "value": f"{price:.5f}", "inline": True},
             {"name": "时间周期", "value": "M15", "inline": True},
-            {"name": "触发条件", "value": f"RSI {'≥ 74' if signal_type=='超买' else '≤ 26'}", "inline": True},
+            {"name": "触发条件", "value": f"RSI {'≥ 73' if signal_type=='超买' else '≤ 27'}", "inline": True},
             {"name": "K线时间", "value": time_str, "inline": True},
         ],
         "footer": {"text": "外汇RSI监控 · 每5分钟检测 · 不重复提醒"},
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
-    payload = {"username": "外汇RSI监控", "embeds": [embed]}
+
+    payload = {
+        "username": "外汇RSI监控",
+        "embeds": [embed]
+    }
+
     try:
         r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
         if r.status_code in (200, 204):
