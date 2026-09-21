@@ -3,12 +3,15 @@ import pandas as pd
 import numpy as np
 import requests
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
+from threading import Thread
+from flask import Flask
 
+# ================== 配置 ==================
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-CHECK_INTERVAL = 300
+CHECK_INTERVAL = 300          # 5分钟
 RSI_PERIOD = 14
 OVERBOUGHT = 74
 OVERSOLD = 26
@@ -37,6 +40,13 @@ DISPLAY_NAME = {
 }
 
 STATE_FILE = "rsi_alert_state.json"
+# ==========================================
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "外汇 RSI 监控机器人运行中 ✅", 200
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -94,7 +104,7 @@ def send_discord_alert(pair_name, rsi_value, price, signal_type, time_str):
             {"name": "K线时间", "value": time_str, "inline": True},
         ],
         "footer": {"text": "外汇RSI监控 · 每5分钟检测 · 不重复提醒"},
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
     payload = {"username": "外汇RSI监控", "embeds": [embed]}
     try:
@@ -106,20 +116,24 @@ def send_discord_alert(pair_name, rsi_value, price, signal_type, time_str):
     except Exception as e:
         print(f"❌ 发送异常: {e}")
 
-def main():
+def monitor_loop():
     if not WEBHOOK_URL:
         print("错误：请设置环境变量 WEBHOOK_URL")
         return
+
     print("=" * 50)
     print("外汇 RSI 监控机器人启动成功")
     print(f"监控 {len(PAIRS)} 个货币对 | M15 | RSI(14)")
     print(f"超买≥{OVERBOUGHT} | 超卖≤{OVERSOLD}")
     print("=" * 50)
+
     state = load_state()
+
     while True:
         start = time.time()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n[{now}] 开始检测...")
+
         for ticker in PAIRS:
             result = get_latest_rsi(ticker)
             if not result:
@@ -127,6 +141,7 @@ def main():
             rsi, price, t = result
             pair_name = DISPLAY_NAME.get(ticker, ticker)
             current = state.get(ticker, "normal")
+
             if rsi >= OVERBOUGHT:
                 new_status = "overbought"
                 signal = "超买"
@@ -136,11 +151,14 @@ def main():
             else:
                 new_status = "normal"
                 signal = None
+
             if new_status != "normal" and current != new_status:
                 time_str = t.strftime("%Y-%m-%d %H:%M") if hasattr(t, "strftime") else str(t)
                 send_discord_alert(pair_name, rsi, price, signal, time_str)
+
             state[ticker] = new_status
             print(f"  {pair_name:10} RSI={rsi:6.2f} → {new_status}")
+
         save_state(state)
         elapsed = time.time() - start
         sleep_time = max(30, CHECK_INTERVAL - elapsed)
@@ -148,4 +166,10 @@ def main():
         time.sleep(sleep_time)
 
 if __name__ == "__main__":
-    main()
+    # 启动监控线程
+    t = Thread(target=monitor_loop, daemon=True)
+    t.start()
+
+    # 启动网页服务（给 Render 用）
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
