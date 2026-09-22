@@ -13,8 +13,8 @@ from flask import Flask
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 CHECK_INTERVAL = 300          # 5分钟
 RSI_PERIOD = 14
-OVERBOUGHT = 73
-OVERSOLD = 27
+OVERBOUGHT = 74
+OVERSOLD = 26
 
 PAIRS = [
     "GBPUSD=X", "EURUSD=X", "AUDUSD=X", "NZDUSD=X",
