@@ -11,12 +11,11 @@ from flask import Flask
 
 # ================== 配置 ==================
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-CHECK_INTERVAL = 300          # 5分钟
+CHECK_INTERVAL = 300
 RSI_PERIOD = 14
 OVERBOUGHT = 73
 OVERSOLD = 27
 
-# 你指定的货币对（biquote 格式，不需要 =X）
 PAIRS = [
     "USDCAD", "GBPUSD", "USDCHF", "USDJPY", "AUDUSD",
     "EURUSD", "NZDUSD", "GBPJPY", "GBPAUD", "GBPCAD",
@@ -69,46 +68,44 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def get_latest_rsi(symbol):
-    """使用 biquote 获取 M15 数据并计算 RSI"""
+    """使用 biquote 获取数据，增加超时和异常处理"""
     try:
         url = f"https://biquote.io/api/{symbol}/ohlc"
-        params = {
-            "interval": "15m",
-            "limit": 50          # 足够计算 RSI
-        }
-        resp = requests.get(url, params=params, timeout=10)
+        params = {"interval": "15m", "limit": 40}
+        
+        resp = requests.get(url, params=params, timeout=8)  # 严格超时
         if resp.status_code != 200:
-            print(f"[{symbol}] 请求失败: {resp.status_code}")
+            print(f"  [{symbol}] HTTP {resp.status_code}")
             return None
 
         data = resp.json()
         bars = data.get("bars", [])
         if len(bars) < RSI_PERIOD + 5:
+            print(f"  [{symbol}] 数据不足")
             return None
 
-        # biquote 返回的是 newest-first，需要反转成 oldest-first
         bars = list(reversed(bars))
-
         closes = [float(bar["close"]) for bar in bars]
-        times = [bar["openTime"] for bar in bars]
-
+        
         series = pd.Series(closes)
         rsi = calculate_rsi(series, RSI_PERIOD)
+        
+        latest_rsi = float(rsi.iloc[-1])
+        latest_price = float(closes[-1])
+        latest_time = bars[-1].get("openTime", "")
 
-        latest_rsi = rsi.iloc[-1]
-        latest_price = closes[-1]
-        latest_time = times[-1]
-
-        # 立刻释放内存
         del bars, closes, series, rsi
         gc.collect()
 
         if pd.isna(latest_rsi):
             return None
-        return float(latest_rsi), float(latest_price), latest_time
+        return latest_rsi, latest_price, latest_time
 
+    except requests.exceptions.Timeout:
+        print(f"  [{symbol}] 超时")
+        return None
     except Exception as e:
-        print(f"[{symbol}] 错误: {e}")
+        print(f"  [{symbol}] 错误: {str(e)[:50]}")
         return None
 
 def send_discord_alert(pair_name, rsi_value, price, signal_type, time_str):
@@ -123,19 +120,16 @@ def send_discord_alert(pair_name, rsi_value, price, signal_type, time_str):
             {"name": "当前价格", "value": f"{price:.5f}", "inline": True},
             {"name": "时间周期", "value": "M15", "inline": True},
             {"name": "触发条件", "value": f"RSI {'≥ 73' if signal_type=='超买' else '≤ 27'}", "inline": True},
-            {"name": "K线时间", "value": str(time_str), "inline": True},
+            {"name": "K线时间", "value": str(time_str)[:19], "inline": True},
         ],
-        "footer": {"text": "外汇RSI监控 · biquote数据 · 每5分钟检测 · 不重复提醒"},
+        "footer": {"text": "外汇RSI监控 · biquote · 每5分钟 · 不重复提醒"},
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-    payload = {
-        "username": "外汇RSI监控",
-        "embeds": [embed]
-    }
+    payload = {"username": "外汇RSI监控", "embeds": [embed]}
 
     try:
-        r = requests.post(WEBHOOK_URL, json=payload, timeout=10)
+        r = requests.post(WEBHOOK_URL, json=payload, timeout=8)
         if r.status_code in (200, 204):
             print(f"✅ 已发送: {pair_name} RSI={rsi_value:.2f} ({signal_type})")
         else:
@@ -149,7 +143,7 @@ def monitor_loop():
         return
 
     print("=" * 50)
-    print("外汇 RSI 监控机器人启动成功（biquote 版本）")
+    print("外汇 RSI 监控机器人启动成功（biquote 修复版）")
     print(f"监控 {len(PAIRS)} 个货币对 | M15 | RSI(14)")
     print(f"超买≥{OVERBOUGHT} | 超卖≤{OVERSOLD}")
     print("=" * 50)
@@ -161,10 +155,13 @@ def monitor_loop():
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n[{now}] 开始检测...")
 
-        for symbol in PAIRS:
+        success_count = 0
+        for i, symbol in enumerate(PAIRS):
             result = get_latest_rsi(symbol)
             if not result:
                 continue
+
+            success_count += 1
             rsi, price, t = result
             pair_name = DISPLAY_NAME.get(symbol, symbol)
             current = state.get(symbol, "normal")
@@ -185,13 +182,17 @@ def monitor_loop():
             state[symbol] = new_status
             print(f"  {pair_name:10} RSI={rsi:6.2f} → {new_status}")
 
-            if PAIRS.index(symbol) % 4 == 0:
+            # 每处理几个就休息一下，避免请求过快
+            if (i + 1) % 5 == 0:
+                time.sleep(0.5)
                 gc.collect()
 
         save_state(state)
         elapsed = time.time() - start
+        print(f"本轮完成，成功 {success_count}/{len(PAIRS)} 个，耗时 {elapsed:.1f}s")
+        
         sleep_time = max(30, CHECK_INTERVAL - elapsed)
-        print(f"本轮完成，等待 {sleep_time:.0f} 秒...")
+        print(f"等待 {sleep_time:.0f} 秒后继续...")
         time.sleep(sleep_time)
 
 if __name__ == "__main__":
