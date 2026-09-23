@@ -1,4 +1,3 @@
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
@@ -17,25 +16,25 @@ RSI_PERIOD = 14
 OVERBOUGHT = 73
 OVERSOLD = 27
 
-# 你指定的货币对
+# 你指定的货币对（biquote 格式，不需要 =X）
 PAIRS = [
-    "USDCAD=X", "GBPUSD=X", "USDCHF=X", "USDJPY=X", "AUDUSD=X",
-    "EURUSD=X", "NZDUSD=X", "GBPJPY=X", "GBPAUD=X", "GBPCAD=X",
-    "GBPCHF=X", "EURGBP=X", "EURCHF=X", "EURCAD=X", "EURAUD=X",
-    "EURJPY=X", "AUDJPY=X", "AUDCHF=X", "AUDCAD=X", "CADCHF=X",
-    "CADJPY=X", "NZDJPY=X", "NZDCHF=X", "CHFJPY=X", "NZDCAD=X"
+    "USDCAD", "GBPUSD", "USDCHF", "USDJPY", "AUDUSD",
+    "EURUSD", "NZDUSD", "GBPJPY", "GBPAUD", "GBPCAD",
+    "GBPCHF", "EURGBP", "EURCHF", "EURCAD", "EURAUD",
+    "EURJPY", "AUDJPY", "AUDCHF", "AUDCAD", "CADCHF",
+    "CADJPY", "NZDJPY", "NZDCHF", "CHFJPY", "NZDCAD"
 ]
 
 DISPLAY_NAME = {
-    "USDCAD=X": "USD/CAD", "GBPUSD=X": "GBP/USD", "USDCHF=X": "USD/CHF",
-    "USDJPY=X": "USD/JPY", "AUDUSD=X": "AUD/USD", "EURUSD=X": "EUR/USD",
-    "NZDUSD=X": "NZD/USD", "GBPJPY=X": "GBP/JPY", "GBPAUD=X": "GBP/AUD",
-    "GBPCAD=X": "GBP/CAD", "GBPCHF=X": "GBP/CHF", "EURGBP=X": "EUR/GBP",
-    "EURCHF=X": "EUR/CHF", "EURCAD=X": "EUR/CAD", "EURAUD=X": "EUR/AUD",
-    "EURJPY=X": "EUR/JPY", "AUDJPY=X": "AUD/JPY", "AUDCHF=X": "AUD/CHF",
-    "AUDCAD=X": "AUD/CAD", "CADCHF=X": "CAD/CHF", "CADJPY=X": "CAD/JPY",
-    "NZDJPY=X": "NZD/JPY", "NZDCHF=X": "NZD/CHF", "CHFJPY=X": "CHF/JPY",
-    "NZDCAD=X": "NZD/CAD"
+    "USDCAD": "USD/CAD", "GBPUSD": "GBP/USD", "USDCHF": "USD/CHF",
+    "USDJPY": "USD/JPY", "AUDUSD": "AUD/USD", "EURUSD": "EUR/USD",
+    "NZDUSD": "NZD/USD", "GBPJPY": "GBP/JPY", "GBPAUD": "GBP/AUD",
+    "GBPCAD": "GBP/CAD", "GBPCHF": "GBP/CHF", "EURGBP": "EUR/GBP",
+    "EURCHF": "EUR/CHF", "EURCAD": "EUR/CAD", "EURAUD": "EUR/AUD",
+    "EURJPY": "EUR/JPY", "AUDJPY": "AUD/JPY", "AUDCHF": "AUD/CHF",
+    "AUDCAD": "AUD/CAD", "CADCHF": "CAD/CHF", "CADJPY": "CAD/JPY",
+    "NZDJPY": "NZD/JPY", "NZDCHF": "NZD/CHF", "CHFJPY": "CHF/JPY",
+    "NZDCAD": "NZD/CAD"
 }
 
 STATE_FILE = "rsi_alert_state.json"
@@ -45,7 +44,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "外汇 RSI 监控机器人运行中 ✅", 200
+    return "外汇 RSI 监控机器人运行中（biquote）✅", 200
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -69,39 +68,47 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def get_latest_rsi(ticker):
-    """每次只拉一个货币对，用完立刻释放内存"""
+def get_latest_rsi(symbol):
+    """使用 biquote 获取 M15 数据并计算 RSI"""
     try:
-        df = yf.download(
-            ticker,
-            period="2d",
-            interval="15m",
-            progress=False,
-            auto_adjust=True,
-            threads=False
-        )
-        if df.empty or len(df) < RSI_PERIOD + 5:
+        url = f"https://biquote.io/api/{symbol}/ohlc"
+        params = {
+            "interval": "15m",
+            "limit": 50          # 足够计算 RSI
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code != 200:
+            print(f"[{symbol}] 请求失败: {resp.status_code}")
             return None
 
-        if isinstance(df.columns, pd.MultiIndex):
-            close = df["Close"].iloc[:, 0].copy()
-        else:
-            close = df["Close"].copy()
+        data = resp.json()
+        bars = data.get("bars", [])
+        if len(bars) < RSI_PERIOD + 5:
+            return None
 
-        rsi = calculate_rsi(close, RSI_PERIOD)
+        # biquote 返回的是 newest-first，需要反转成 oldest-first
+        bars = list(reversed(bars))
+
+        closes = [float(bar["close"]) for bar in bars]
+        times = [bar["openTime"] for bar in bars]
+
+        series = pd.Series(closes)
+        rsi = calculate_rsi(series, RSI_PERIOD)
+
         latest_rsi = rsi.iloc[-1]
-        latest_price = close.iloc[-1]
-        latest_time = close.index[-1]
+        latest_price = closes[-1]
+        latest_time = times[-1]
 
         # 立刻释放内存
-        del df, close, rsi
+        del bars, closes, series, rsi
         gc.collect()
 
         if pd.isna(latest_rsi):
             return None
         return float(latest_rsi), float(latest_price), latest_time
+
     except Exception as e:
-        print(f"[{ticker}] 错误: {e}")
+        print(f"[{symbol}] 错误: {e}")
         return None
 
 def send_discord_alert(pair_name, rsi_value, price, signal_type, time_str):
@@ -116,9 +123,9 @@ def send_discord_alert(pair_name, rsi_value, price, signal_type, time_str):
             {"name": "当前价格", "value": f"{price:.5f}", "inline": True},
             {"name": "时间周期", "value": "M15", "inline": True},
             {"name": "触发条件", "value": f"RSI {'≥ 73' if signal_type=='超买' else '≤ 27'}", "inline": True},
-            {"name": "K线时间", "value": time_str, "inline": True},
+            {"name": "K线时间", "value": str(time_str), "inline": True},
         ],
-        "footer": {"text": "外汇RSI监控 · 每5分钟检测 · 不重复提醒"},
+        "footer": {"text": "外汇RSI监控 · biquote数据 · 每5分钟检测 · 不重复提醒"},
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
@@ -142,7 +149,7 @@ def monitor_loop():
         return
 
     print("=" * 50)
-    print("外汇 RSI 监控机器人启动成功（内存优化版）")
+    print("外汇 RSI 监控机器人启动成功（biquote 版本）")
     print(f"监控 {len(PAIRS)} 个货币对 | M15 | RSI(14)")
     print(f"超买≥{OVERBOUGHT} | 超卖≤{OVERSOLD}")
     print("=" * 50)
@@ -154,13 +161,13 @@ def monitor_loop():
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n[{now}] 开始检测...")
 
-        for ticker in PAIRS:
-            result = get_latest_rsi(ticker)
+        for symbol in PAIRS:
+            result = get_latest_rsi(symbol)
             if not result:
                 continue
             rsi, price, t = result
-            pair_name = DISPLAY_NAME.get(ticker, ticker)
-            current = state.get(ticker, "normal")
+            pair_name = DISPLAY_NAME.get(symbol, symbol)
+            current = state.get(symbol, "normal")
 
             if rsi >= OVERBOUGHT:
                 new_status = "overbought"
@@ -173,14 +180,12 @@ def monitor_loop():
                 signal = None
 
             if new_status != "normal" and current != new_status:
-                time_str = t.strftime("%Y-%m-%d %H:%M") if hasattr(t, "strftime") else str(t)
-                send_discord_alert(pair_name, rsi, price, signal, time_str)
+                send_discord_alert(pair_name, rsi, price, signal, t)
 
-            state[ticker] = new_status
+            state[symbol] = new_status
             print(f"  {pair_name:10} RSI={rsi:6.2f} → {new_status}")
 
-            # 每处理几个就强制回收内存
-            if PAIRS.index(ticker) % 4 == 0:
+            if PAIRS.index(symbol) % 4 == 0:
                 gc.collect()
 
         save_state(state)
