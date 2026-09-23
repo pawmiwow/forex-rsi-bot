@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 import json
 import os
+import gc
 from threading import Thread
 from flask import Flask
 
@@ -16,27 +17,25 @@ RSI_PERIOD = 14
 OVERBOUGHT = 73
 OVERSOLD = 27
 
+# 你指定的货币对
 PAIRS = [
-    "GBPUSD=X", "EURUSD=X", "AUDUSD=X", "NZDUSD=X",
-    "USDCAD=X", "USDCHF=X", "USDJPY=X", "GBPJPY=X",
-    "EURJPY=X", "AUDCHF=X", "CHFJPY=X", "GBPAUD=X",
-    "EURAUD=X", "AUDJPY=X", "NZDJPY=X", "GBPCAD=X",
-    "EURCAD=X", "NZDCHF=X", "GBPCHF=X",
-    "EURCHF=X", "CADCHF=X",  
-    "NZDCAD=X", "EURGBP=X", "AUDCAD=X", "CADJPY=X"
+    "USDCAD=X", "GBPUSD=X", "USDCHF=X", "USDJPY=X", "AUDUSD=X",
+    "EURUSD=X", "NZDUSD=X", "GBPJPY=X", "GBPAUD=X", "GBPCAD=X",
+    "GBPCHF=X", "EURGBP=X", "EURCHF=X", "EURCAD=X", "EURAUD=X",
+    "EURJPY=X", "AUDJPY=X", "AUDCHF=X", "AUDCAD=X", "CADCHF=X",
+    "CADJPY=X", "NZDJPY=X", "NZDCHF=X", "CHFJPY=X", "NZDCAD=X"
 ]
 
 DISPLAY_NAME = {
-    "GBPUSD=X": "GBP/USD", "EURUSD=X": "EUR/USD", "AUDUSD=X": "AUD/USD",
-    "NZDUSD=X": "NZD/USD", "USDCAD=X": "USD/CAD", "USDCHF=X": "USD/CHF",
-    "USDJPY=X": "USD/JPY", "GBPJPY=X": "GBP/JPY", "EURJPY=X": "EUR/JPY",
-    "AUDCHF=X": "AUD/CHF", "CHFJPY=X": "CHF/JPY", "GBPAUD=X": "GBP/AUD",
-    "EURAUD=X": "EUR/AUD", "AUDJPY=X": "AUD/JPY", "NZDJPY=X": "NZD/JPY",
-    "GBPCAD=X": "GBP/CAD", "EURCAD=X": "EUR/CAD", 
-    "NZDCHF=X": "NZD/CHF", "GBPCHF=X": "GBP/CHF", "EURCHF=X": "EUR/CHF",
-    "CADCHF=X": "CAD/CHF", 
-    "NZDCAD=X": "NZD/CAD", "EURGBP=X": "EUR/GBP", "AUDCAD=X": "AUD/CAD",
-    "CADJPY=X": "CAD/JPY"
+    "USDCAD=X": "USD/CAD", "GBPUSD=X": "GBP/USD", "USDCHF=X": "USD/CHF",
+    "USDJPY=X": "USD/JPY", "AUDUSD=X": "AUD/USD", "EURUSD=X": "EUR/USD",
+    "NZDUSD=X": "NZD/USD", "GBPJPY=X": "GBP/JPY", "GBPAUD=X": "GBP/AUD",
+    "GBPCAD=X": "GBP/CAD", "GBPCHF=X": "GBP/CHF", "EURGBP=X": "EUR/GBP",
+    "EURCHF=X": "EUR/CHF", "EURCAD=X": "EUR/CAD", "EURAUD=X": "EUR/AUD",
+    "EURJPY=X": "EUR/JPY", "AUDJPY=X": "AUD/JPY", "AUDCHF=X": "AUD/CHF",
+    "AUDCAD=X": "AUD/CAD", "CADCHF=X": "CAD/CHF", "CADJPY=X": "CAD/JPY",
+    "NZDJPY=X": "NZD/JPY", "NZDCHF=X": "NZD/CHF", "CHFJPY=X": "CHF/JPY",
+    "NZDCAD=X": "NZD/CAD"
 }
 
 STATE_FILE = "rsi_alert_state.json"
@@ -71,18 +70,33 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def get_latest_rsi(ticker):
+    """每次只拉一个货币对，用完立刻释放内存"""
     try:
-        df = yf.download(ticker, period="5d", interval="15m", progress=False, auto_adjust=True)
+        df = yf.download(
+            ticker,
+            period="2d",
+            interval="15m",
+            progress=False,
+            auto_adjust=True,
+            threads=False
+        )
         if df.empty or len(df) < RSI_PERIOD + 5:
             return None
+
         if isinstance(df.columns, pd.MultiIndex):
-            close = df["Close"].iloc[:, 0]
+            close = df["Close"].iloc[:, 0].copy()
         else:
-            close = df["Close"]
+            close = df["Close"].copy()
+
         rsi = calculate_rsi(close, RSI_PERIOD)
         latest_rsi = rsi.iloc[-1]
         latest_price = close.iloc[-1]
         latest_time = close.index[-1]
+
+        # 立刻释放内存
+        del df, close, rsi
+        gc.collect()
+
         if pd.isna(latest_rsi):
             return None
         return float(latest_rsi), float(latest_price), latest_time
@@ -92,8 +106,6 @@ def get_latest_rsi(ticker):
 
 def send_discord_alert(pair_name, rsi_value, price, signal_type, time_str):
     color = 0xFF0000 if signal_type == "超买" else 0x00FF00
-
-    # 第一行标题样式：【NZD/JPY】 RSI(14) 73
     title_text = f"【{pair_name}】 RSI(14) {rsi_value:.2f}"
 
     embed = {
@@ -130,7 +142,7 @@ def monitor_loop():
         return
 
     print("=" * 50)
-    print("外汇 RSI 监控机器人启动成功")
+    print("外汇 RSI 监控机器人启动成功（内存优化版）")
     print(f"监控 {len(PAIRS)} 个货币对 | M15 | RSI(14)")
     print(f"超买≥{OVERBOUGHT} | 超卖≤{OVERSOLD}")
     print("=" * 50)
@@ -167,6 +179,10 @@ def monitor_loop():
             state[ticker] = new_status
             print(f"  {pair_name:10} RSI={rsi:6.2f} → {new_status}")
 
+            # 每处理几个就强制回收内存
+            if PAIRS.index(ticker) % 4 == 0:
+                gc.collect()
+
         save_state(state)
         elapsed = time.time() - start
         sleep_time = max(30, CHECK_INTERVAL - elapsed)
@@ -174,10 +190,8 @@ def monitor_loop():
         time.sleep(sleep_time)
 
 if __name__ == "__main__":
-    # 启动监控线程
     t = Thread(target=monitor_loop, daemon=True)
     t.start()
 
-    # 启动网页服务（给 Render 用）
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
